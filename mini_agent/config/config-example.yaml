@@ -36,6 +36,7 @@ retry:
 max_steps: 100  # Maximum execution steps
 workspace_dir: "./workspace"  # Working directory
 system_prompt_path: "system_prompt.md"  # System prompt file (same config directory)
+log_dir: null  # Log directory path, null means use default ~/.mini-agent/log. Example: "E:/m2_work/log"
 
 # ===== Tools Configuration =====
 tools:

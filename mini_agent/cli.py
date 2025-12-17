@@ -5,8 +5,10 @@ Usage:
     mini-agent [--workspace DIR]
 
 Examples:
-    mini-agent                              # Use current directory as workspace
-    mini-agent --workspace /path/to/dir     # Use specific workspace directory
+  mini-agent                                    # Use current directory as workspace
+  mini-agent --workspace /path/to/dir           # Use specific workspace directory
+  mini-agent --config /path/to/config.yaml      # Use specific config file
+  mini-agent -w /path/to/dir -c /path/to/config.yaml  # Both workspace and config
 """
 
 import argparse
@@ -199,6 +201,13 @@ Examples:
         help="Workspace directory (default: current directory)",
     )
     parser.add_argument(
+        "--config",
+        "-c",
+        type=str,
+        default=None,
+        help="Configuration file path (default: auto-detect from search path)",
+    )
+    parser.add_argument(
         "--version",
         "-v",
         action="version",
@@ -273,8 +282,8 @@ async def initialize_base_tools(config: Config):
     if config.tools.enable_mcp:
         print(f"{Colors.BRIGHT_CYAN}Loading MCP tools...{Colors.RESET}")
         try:
-            # Use priority search for mcp.json
-            mcp_config_path = Config.find_config_file(config.tools.mcp_config_path)
+            # Use priority search for mcp.json (relative to config directory if custom path was used)
+            mcp_config_path = config.find_config_file(config.tools.mcp_config_path)
             if mcp_config_path:
                 mcp_tools = await load_mcp_tools_async(str(mcp_config_path))
                 if mcp_tools:
@@ -321,16 +330,20 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
 
 
-async def run_agent(workspace_dir: Path):
+async def run_agent(workspace_dir: Path, config_path: Path | None = None):
     """Run interactive Agent
 
     Args:
         workspace_dir: Workspace directory path
+        config_path: Optional configuration file path. If None, uses default search path.
     """
     session_start = datetime.now()
 
-    # 1. Load configuration from package directory
-    config_path = Config.get_default_config_path()
+    # 1. Load configuration
+    if config_path is None:
+        config_path = Config.get_default_config_path()
+    else:
+        config_path = Path(config_path).expanduser().resolve()
 
     if not config_path.exists():
         print(f"{Colors.RED}❌ Configuration file not found{Colors.RESET}")
@@ -412,8 +425,8 @@ async def run_agent(workspace_dir: Path):
     # 4. Add workspace-dependent tools
     add_workspace_tools(tools, config, workspace_dir)
 
-    # 5. Load System Prompt (with priority search)
-    system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
+    # 5. Load System Prompt (with priority search, relative to config directory if custom path was used)
+    system_prompt_path = config.find_config_file(config.agent.system_prompt_path)
     if system_prompt_path and system_prompt_path.exists():
         system_prompt = system_prompt_path.read_text(encoding="utf-8")
         print(f"{Colors.GREEN}✅ Loaded system prompt (from: {system_prompt_path}){Colors.RESET}")
@@ -442,6 +455,7 @@ async def run_agent(workspace_dir: Path):
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        log_dir=config.agent.log_dir,
     )
 
     # 8. Display welcome information
@@ -592,8 +606,11 @@ def main():
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run the agent (config always loaded from package directory)
-    asyncio.run(run_agent(workspace_dir))
+    # Determine config path
+    config_path = Path(args.config).expanduser().resolve() if args.config else None
+
+    # Run the agent
+    asyncio.run(run_agent(workspace_dir, config_path=config_path))
 
 
 if __name__ == "__main__":

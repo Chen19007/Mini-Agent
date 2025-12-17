@@ -16,13 +16,21 @@ class AgentLogger:
     - Tool calls and results
     """
 
-    def __init__(self):
+    def __init__(self, log_dir: Path | str | None = None):
         """Initialize logger
 
-        Logs are stored in ~/.mini-agent/log/ directory
+        Args:
+            log_dir: Log directory path. If None, uses ~/.mini-agent/log/
+        
+        Logs are stored in the specified directory or ~/.mini-agent/log/ by default
         """
-        # Use ~/.mini-agent/log/ directory for logs
-        self.log_dir = Path.home() / ".mini-agent" / "log"
+        if log_dir is None:
+            # Use ~/.mini-agent/log/ directory for logs (default)
+            self.log_dir = Path.home() / ".mini-agent" / "log"
+        else:
+            # Use specified log directory
+            self.log_dir = Path(log_dir).expanduser().resolve()
+        
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = None
         self.log_index = 0

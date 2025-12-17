@@ -50,6 +50,7 @@ class Agent:
         max_steps: int = 50,
         workspace_dir: str = "./workspace",
         token_limit: int = 80000,  # Summary triggered when tokens exceed this value
+        log_dir: str | None = None,  # Log directory, None means use default
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -70,8 +71,8 @@ class Agent:
         # Initialize message history
         self.messages: list[Message] = [Message(role="system", content=system_prompt)]
 
-        # Initialize logger
-        self.logger = AgentLogger()
+        # Initialize logger with optional log directory
+        self.logger = AgentLogger(log_dir=log_dir)
 
         # Token usage from last API response (updated after each LLM call)
         self.api_total_tokens: int = 0

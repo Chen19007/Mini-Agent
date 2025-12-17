@@ -35,6 +35,7 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
+    log_dir: str | None = None  # Log directory, None means use default ~/.mini-agent/log
 
 
 class ToolsConfig(BaseModel):
@@ -60,6 +61,11 @@ class Config(BaseModel):
     llm: LLMConfig
     agent: AgentConfig
     tools: ToolsConfig
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Internal attribute to store config directory (not a model field)
+        object.__setattr__(self, "_config_dir", data.get("_config_dir"))
 
     @classmethod
     def load(cls) -> "Config":
@@ -126,6 +132,7 @@ class Config(BaseModel):
             max_steps=data.get("max_steps", 50),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
+            log_dir=data.get("log_dir"),
         )
 
         # Parse tools configuration
@@ -140,11 +147,17 @@ class Config(BaseModel):
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
         )
 
-        return cls(
+        # Store the directory containing the config file
+        config_dir = config_path.parent
+
+        config_instance = cls(
             llm=llm_config,
             agent=agent_config,
             tools=tools_config,
         )
+        # Set config directory as instance attribute (not a model field)
+        object.__setattr__(config_instance, "_config_dir", config_dir)
+        return config_instance
 
     @staticmethod
     def get_package_dir() -> Path:
@@ -156,9 +169,51 @@ class Config(BaseModel):
         # Get the directory where this config.py file is located
         return Path(__file__).parent
 
-    @classmethod
-    def find_config_file(cls, filename: str) -> Path | None:
+    def find_config_file(self, filename: str) -> Path | None:
         """Find configuration file with priority order
+        
+        If this Config instance was loaded from a specific path, files are searched
+        relative to that config directory first.
+
+        Search order:
+        1) Same directory as config.yaml (if loaded from custom path)
+        2) mini_agent/config/{filename} in current directory (development mode)
+        3) ~/.mini-agent/config/{filename} in user home directory
+        4) {package}/mini_agent/config/{filename} in package installation directory
+
+        Args:
+            filename: Configuration file name (e.g., "config.yaml", "mcp.json", "system_prompt.md")
+
+        Returns:
+            Path to found config file, or None if not found
+        """
+        # Priority 1: Same directory as the config file (if loaded from custom path)
+        config_dir = getattr(self, "_config_dir", None)
+        if config_dir:
+            custom_config = Path(config_dir) / filename
+            if custom_config.exists():
+                return custom_config
+
+        # Priority 2: Development mode - current directory's config/ subdirectory
+        dev_config = Path.cwd() / "mini_agent" / "config" / filename
+        if dev_config.exists():
+            return dev_config
+
+        # Priority 3: User config directory
+        user_config = Path.home() / ".mini-agent" / "config" / filename
+        if user_config.exists():
+            return user_config
+
+        # Priority 4: Package installation directory's config/ subdirectory
+        package_config = self.get_package_dir() / "config" / filename
+        if package_config.exists():
+            return package_config
+
+        return None
+
+    @classmethod
+    def find_config_file_static(cls, filename: str) -> Path | None:
+        """Static method to find configuration file (for use when no Config instance exists)
 
         Search for config file in the following order of priority:
         1) mini_agent/config/{filename} in current directory (development mode)
@@ -195,7 +250,7 @@ class Config(BaseModel):
         Returns:
             Path to config.yaml (prioritizes: dev config/ > user config/ > package config/)
         """
-        config_path = cls.find_config_file("config.yaml")
+        config_path = cls.find_config_file_static("config.yaml")
         if config_path:
             return config_path
 
