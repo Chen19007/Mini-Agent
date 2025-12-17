@@ -360,14 +360,81 @@ async def run_acp_server(config: Config | None = None, config_path: Path | str |
         config: Optional Config instance. If provided, config_path is ignored.
         config_path: Optional configuration file path. If None and config is None, uses default search path.
     """
+    config_source = "provided Config instance"
+    actual_config_path = None
+    
     if config is None:
         if config_path is None:
-            config = Config.load()
-        else:
+            # Check environment variable
+            import os
+            env_config_path = os.environ.get("MINI_AGENT_CONFIG_PATH")
+            if env_config_path:
+                config_path = env_config_path
+                config_source = f"environment variable MINI_AGENT_CONFIG_PATH: {config_path}"
+            else:
+                config_path = Config.get_default_config_path()
+                config_source = f"default search path: {config_path}"
+            actual_config_path = config_path
             config = Config.from_yaml(config_path)
+        else:
+            config_path = Path(config_path).expanduser().resolve()
+            actual_config_path = config_path
+            config_source = f"provided config_path: {config_path}"
+            config = Config.from_yaml(config_path)
+    else:
+        # Config instance provided, try to determine source
+        config_dir = getattr(config, "_config_dir", None)
+        if config_dir:
+            actual_config_path = Path(config_dir) / "config.yaml"
+            if actual_config_path.exists():
+                config_source = f"provided Config instance (from: {actual_config_path})"
+            else:
+                config_source = "provided Config instance (path unknown)"
+        else:
+            config_source = "provided Config instance (path unknown)"
+    
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    base_tools, skill_loader = await initialize_base_tools(config)
+    
+    # Log configuration paths
+    logger.info("=" * 60)
+    logger.info("Mini-Agent ACP Server - Configuration Paths")
+    logger.info("=" * 60)
+    logger.info(f"Config file: {actual_config_path} ({config_source})")
+    
+    config_dir = getattr(config, "_config_dir", None)
+    if config_dir:
+        logger.info(f"Config directory: {config_dir}")
+    
+    # Workspace directory (from config or default)
+    workspace_dir = Path(config.agent.workspace_dir).expanduser().resolve()
+    logger.info(f"Workspace directory: {workspace_dir}")
+    
+    # Log directory
+    if config.agent.log_dir:
+        log_dir_resolved = Path(config.agent.log_dir).expanduser().resolve()
+        logger.info(f"Log directory: {log_dir_resolved} (from config)")
+    else:
+        default_log_dir = Path.home() / ".mini-agent" / "log"
+        logger.info(f"Log directory: {default_log_dir} (default)")
+    
+    # System prompt path
     prompt_path = config.find_config_file(config.agent.system_prompt_path)
+    if prompt_path and prompt_path.exists():
+        logger.info(f"System prompt: {prompt_path}")
+    else:
+        logger.info(f"System prompt: {config.agent.system_prompt_path} (not found, using default)")
+    
+    # MCP config path
+    if config.tools.enable_mcp:
+        mcp_config_path = config.find_config_file(config.tools.mcp_config_path)
+        if mcp_config_path and mcp_config_path.exists():
+            logger.info(f"MCP config: {mcp_config_path}")
+        else:
+            logger.info(f"MCP config: {config.tools.mcp_config_path} (not found)")
+    
+    logger.info("=" * 60)
+    
+    base_tools, skill_loader = await initialize_base_tools(config)
     if prompt_path and prompt_path.exists():
         system_prompt = prompt_path.read_text(encoding="utf-8")
     else:

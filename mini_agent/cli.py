@@ -340,10 +340,12 @@ async def run_agent(workspace_dir: Path, config_path: Path | None = None):
     session_start = datetime.now()
 
     # 1. Load configuration
+    config_source = "default search path"
     if config_path is None:
         config_path = Config.get_default_config_path()
     else:
         config_path = Path(config_path).expanduser().resolve()
+        config_source = f"command line argument: {config_path}"
 
     if not config_path.exists():
         print(f"{Colors.RED}❌ Configuration file not found{Colors.RESET}")
@@ -382,6 +384,15 @@ async def run_agent(workspace_dir: Path, config_path: Path | None = None):
     except Exception as e:
         print(f"{Colors.RED}❌ Error: Failed to load configuration file: {e}{Colors.RESET}")
         return
+
+    # Print configuration paths information
+    print(f"{Colors.BRIGHT_CYAN}📋 Configuration Paths:{Colors.RESET}")
+    print(f"  {Colors.GREEN}✓ Config file:{Colors.RESET} {config_path} ({config_source})")
+    config_dir = getattr(config, "_config_dir", None)
+    if config_dir:
+        print(f"  {Colors.GREEN}✓ Config directory:{Colors.RESET} {config_dir}")
+    else:
+        print(f"  {Colors.DIM}  Config directory: (not set){Colors.RESET}")
 
     # 2. Initialize LLM client
     from mini_agent.retry import RetryConfig as RetryConfigBase
@@ -429,10 +440,31 @@ async def run_agent(workspace_dir: Path, config_path: Path | None = None):
     system_prompt_path = config.find_config_file(config.agent.system_prompt_path)
     if system_prompt_path and system_prompt_path.exists():
         system_prompt = system_prompt_path.read_text(encoding="utf-8")
-        print(f"{Colors.GREEN}✅ Loaded system prompt (from: {system_prompt_path}){Colors.RESET}")
+        print(f"  {Colors.GREEN}✓ System prompt:{Colors.RESET} {system_prompt_path}")
     else:
         system_prompt = "You are Mini-Agent, an intelligent assistant powered by MiniMax M2 that can help users complete various tasks."
-        print(f"{Colors.YELLOW}⚠️  System prompt not found, using default{Colors.RESET}")
+        print(f"  {Colors.YELLOW}⚠ System prompt:{Colors.RESET} {config.agent.system_prompt_path} (not found, using default)")
+
+    # Print additional paths
+    workspace_resolved = Path(workspace_dir).expanduser().resolve()
+    print(f"  {Colors.GREEN}✓ Workspace directory:{Colors.RESET} {workspace_resolved}")
+    
+    # Log directory
+    if config.agent.log_dir:
+        log_dir_resolved = Path(config.agent.log_dir).expanduser().resolve()
+        print(f"  {Colors.GREEN}✓ Log directory:{Colors.RESET} {log_dir_resolved} (from config)")
+    else:
+        default_log_dir = Path.home() / ".mini-agent" / "log"
+        print(f"  {Colors.GREEN}✓ Log directory:{Colors.RESET} {default_log_dir} (default)")
+    
+    # MCP config path
+    if config.tools.enable_mcp:
+        mcp_config_path = config.find_config_file(config.tools.mcp_config_path)
+        if mcp_config_path and mcp_config_path.exists():
+            print(f"  {Colors.GREEN}✓ MCP config:{Colors.RESET} {mcp_config_path}")
+        else:
+            print(f"  {Colors.DIM}  MCP config:{Colors.RESET} {config.tools.mcp_config_path} (not found)")
+    print()
 
     # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
     if skill_loader:
