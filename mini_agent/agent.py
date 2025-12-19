@@ -239,6 +239,10 @@ class Agent:
             if msg.role == "assistant":
                 content_text = msg.content if isinstance(msg.content, str) else str(msg.content)
                 summary_content += f"Assistant: {content_text}\n"
+                # Add thinking content (truncate if too long to preserve key reasoning)
+                if msg.thinking:
+                    thinking_preview = msg.thinking[:1000] + "..." if len(msg.thinking) > 1000 else msg.thinking
+                    summary_content += f"  🧠 Reasoning: {thinking_preview}\n"
                 if msg.tool_calls:
                     tool_names = [tc.function.name for tc in msg.tool_calls]
                     summary_content += f"  → Called tools: {', '.join(tool_names)}\n"
@@ -255,9 +259,10 @@ class Agent:
 Requirements:
 1. Focus on what tasks were completed and which tools were called
 2. Keep key execution results and important findings
-3. Be concise and clear, within 1000 words
-4. Use English
-5. Do not include "user" related content, only summarize the Agent's execution process"""
+3. Preserve important reasoning processes and decision-making logic from the thinking content
+4. Be concise and clear, within 1000 words
+5. Use English
+6. Do not include "user" related content, only summarize the Agent's execution process"""
 
             summary_msg = Message(role="user", content=summary_prompt)
             response = await self.llm.generate(

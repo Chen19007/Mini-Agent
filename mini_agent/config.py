@@ -36,6 +36,7 @@ class AgentConfig(BaseModel):
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
     log_dir: str | None = None  # Log directory, None means use default ~/.mini-agent/log
+    thread_storage_dir: str | None = None  # Thread storage directory, None means use {config_dir}/threads
 
 
 class ToolsConfig(BaseModel):
@@ -45,10 +46,6 @@ class ToolsConfig(BaseModel):
     enable_file_tools: bool = True
     enable_bash: bool = True
     enable_note: bool = True
-
-    # Skills
-    enable_skills: bool = True
-    skills_dir: str = "./skills"
 
     # MCP tools
     enable_mcp: bool = True
@@ -133,6 +130,7 @@ class Config(BaseModel):
             workspace_dir=data.get("workspace_dir", "./workspace"),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             log_dir=data.get("log_dir"),
+            thread_storage_dir=data.get("thread_storage_dir"),
         )
 
         # Parse tools configuration
@@ -141,8 +139,6 @@ class Config(BaseModel):
             enable_file_tools=tools_data.get("enable_file_tools", True),
             enable_bash=tools_data.get("enable_bash", True),
             enable_note=tools_data.get("enable_note", True),
-            enable_skills=tools_data.get("enable_skills", True),
-            skills_dir=tools_data.get("skills_dir", "./skills"),
             enable_mcp=tools_data.get("enable_mcp", True),
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
         )

@@ -1,8 +1,14 @@
 {
   "mcpServers": {
+    "simple_web_search": {
+      "description": "Simple Web Search - Go exe version (no dependencies)",
+      "command": "E:/tools/simple-web-search-mcp/simple_web_search_mcp.exe",
+      "args": [],
+      "env": {},
+      "disabled": false
+    },
     "minimax_search": {
-      "description": "MiniMax Search - Powerful web search and intelligent browsing ⭐",
-      "type": "stdio",
+      "description": "MiniMax Search - Powerful web search and intelligent browsing",
       "command": "uvx",
       "args": [
         "--from",
@@ -24,6 +30,19 @@
         "@modelcontextprotocol/server-memory"
       ],
       "disabled": true
+    },
+    "everything": {
+      "description": "Everything - Fast local file search via HTTP API",
+      "command": "node",
+      "args": [
+        "D:/project/nodejs/mcp/everything-mcp-server/dist/index.js"
+      ],
+      "env": {
+        "EVERYTHING_API_URL": "http://localhost:8000",
+        "EVERYTHING_USERNAME": "mcp",
+        "EVERYTHING_PASSWORD": "4mcp"
+      },
+      "disabled": false
     }
   }
 }

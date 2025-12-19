@@ -37,6 +37,7 @@ max_steps: 100  # Maximum execution steps
 workspace_dir: "./workspace"  # Working directory
 system_prompt_path: "system_prompt.md"  # System prompt file (same config directory)
 log_dir: null  # Log directory path, null means use default ~/.mini-agent/log. Example: "E:/m2_work/log"
+thread_storage_dir: null  # Thread storage directory, null means use {config_dir}/threads. Example: "E:/m2_work/threads"
 
 # ===== Tools Configuration =====
 tools:
@@ -44,10 +45,6 @@ tools:
   enable_file_tools: true  # File read/write/edit tools (ReadTool, WriteTool, EditTool)
   enable_bash: true        # Bash command execution tool
   enable_note: true        # Session note tool (SessionNoteTool)
-  
-  # Claude Skills
-  enable_skills: true      # Enable Skills
-  skills_dir: "./skills"   # Skills directory path
   
   # MCP Tools
   enable_mcp: true         # Enable MCP tools

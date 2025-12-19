@@ -31,9 +31,8 @@ from mini_agent.schema import LLMProvider
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
-from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async
+from mini_agent.tools.mcp_loader import cleanup_mcp_connections, get_mcp_tools_metadata_prompt, load_mcp_tools_async
 from mini_agent.tools.note_tool import SessionNoteTool
-from mini_agent.tools.skill_tool import create_skill_tools
 from mini_agent.utils import calculate_display_width
 
 
@@ -227,11 +226,10 @@ async def initialize_base_tools(config: Config):
         config: Configuration object
 
     Returns:
-        Tuple of (list of tools, skill loader if skills enabled)
+        List of tools
     """
 
     tools = []
-    skill_loader = None
 
     # 1. Bash tool and Bash Output tool
     if config.tools.enable_bash:
@@ -247,38 +245,7 @@ async def initialize_base_tools(config: Config):
         tools.append(bash_kill_tool)
         print(f"{Colors.GREEN}✅ Loaded Bash Kill tool{Colors.RESET}")
 
-    # 3. Claude Skills (loaded from package directory)
-    if config.tools.enable_skills:
-        print(f"{Colors.BRIGHT_CYAN}Loading Claude Skills...{Colors.RESET}")
-        try:
-            # Resolve skills directory with priority search
-            skills_dir = config.tools.skills_dir
-            if not Path(skills_dir).is_absolute():
-                # Search in priority order:
-                # 1. Current directory (dev mode: ./skills or ./mini_agent/skills)
-                # 2. Package directory (installed: site-packages/mini_agent/skills)
-                search_paths = [
-                    Path(skills_dir),  # ./skills for backward compatibility
-                    Path("mini_agent") / skills_dir,  # ./mini_agent/skills
-                    Config.get_package_dir() / skills_dir,  # site-packages/mini_agent/skills
-                ]
-
-                # Find first existing path
-                for path in search_paths:
-                    if path.exists():
-                        skills_dir = str(path.resolve())
-                        break
-
-            skill_tools, skill_loader = create_skill_tools(skills_dir)
-            if skill_tools:
-                tools.extend(skill_tools)
-                print(f"{Colors.GREEN}✅ Loaded Skill tool (get_skill){Colors.RESET}")
-            else:
-                print(f"{Colors.YELLOW}⚠️  No available Skills found{Colors.RESET}")
-        except Exception as e:
-            print(f"{Colors.YELLOW}⚠️  Failed to load Skills: {e}{Colors.RESET}")
-
-    # 4. MCP tools (loaded with priority search)
+    # 2. MCP tools (loaded with priority search)
     if config.tools.enable_mcp:
         print(f"{Colors.BRIGHT_CYAN}Loading MCP tools...{Colors.RESET}")
         try:
@@ -297,7 +264,7 @@ async def initialize_base_tools(config: Config):
             print(f"{Colors.YELLOW}⚠️  Failed to load MCP tools: {e}{Colors.RESET}")
 
     print()  # Empty line separator
-    return tools, skill_loader
+    return tools
 
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
@@ -431,7 +398,7 @@ async def run_agent(workspace_dir: Path, config_path: Path | None = None):
         print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
 
     # 3. Initialize base tools (independent of workspace)
-    tools, skill_loader = await initialize_base_tools(config)
+    tools = await initialize_base_tools(config)
 
     # 4. Add workspace-dependent tools
     add_workspace_tools(tools, config, workspace_dir)
@@ -466,19 +433,26 @@ async def run_agent(workspace_dir: Path, config_path: Path | None = None):
             print(f"  {Colors.DIM}  MCP config:{Colors.RESET} {config.tools.mcp_config_path} (not found)")
     print()
 
-    # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
-    if skill_loader:
-        skills_metadata = skill_loader.get_skills_metadata_prompt()
-        if skills_metadata:
+    # 6. Remove Skills Metadata placeholder (skills feature removed)
+    system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+
+    # 7. Inject MCP Tools Metadata into System Prompt
+    # Extract MCP tools from the tools list
+    from mini_agent.tools.mcp_loader import MCPTool
+    mcp_tools = [tool for tool in tools if isinstance(tool, MCPTool)]
+    if mcp_tools:
+        mcp_metadata = get_mcp_tools_metadata_prompt(mcp_tools)
+        if mcp_metadata:
             # Replace placeholder with actual metadata
-            system_prompt = system_prompt.replace("{SKILLS_METADATA}", skills_metadata)
-            print(f"{Colors.GREEN}✅ Injected {len(skill_loader.loaded_skills)} skills metadata into system prompt{Colors.RESET}")
+            system_prompt = system_prompt.replace("{MCP_TOOLS_METADATA}", mcp_metadata)
+            print(f"{Colors.GREEN}✅ Injected {len(mcp_tools)} MCP tools metadata into system prompt{Colors.RESET}")
         else:
-            # Remove placeholder if no skills
-            system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+            # Remove placeholder if no metadata generated
+            system_prompt = system_prompt.replace("{MCP_TOOLS_METADATA}", "")
     else:
-        # Remove placeholder if skills not enabled
-        system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+        # Generate metadata even if no tools (will show a helpful message)
+        mcp_metadata = get_mcp_tools_metadata_prompt([])
+        system_prompt = system_prompt.replace("{MCP_TOOLS_METADATA}", mcp_metadata)
 
     # 7. Create Agent
     agent = Agent(
