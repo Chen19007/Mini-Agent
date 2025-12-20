@@ -213,6 +213,25 @@ class AnthropicClient(LLMClientBase):
         thinking_content = ""
         tool_calls = []
 
+        # Handle case where response.content is None (shouldn't happen normally, but API might return it)
+        if response.content is None:
+            logger.warning("API response has None content, returning empty response")
+            # Still try to extract usage information if available
+            usage = None
+            if hasattr(response, "usage") and response.usage:
+                usage = TokenUsage(
+                    prompt_tokens=response.usage.input_tokens or 0,
+                    completion_tokens=response.usage.output_tokens or 0,
+                    total_tokens=(response.usage.input_tokens or 0) + (response.usage.output_tokens or 0),
+                )
+            return LLMResponse(
+                content="",
+                thinking=None,
+                tool_calls=None,
+                finish_reason=response.stop_reason or "stop",
+                usage=usage,
+            )
+
         for block in response.content:
             if block.type == "text":
                 text_content += block.text

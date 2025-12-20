@@ -115,6 +115,12 @@ class MCPServerConnection:
             self.session = session
 
             # Initialize the session
+            # Note: Some MCP servers may output non-JSONRPC messages to stdout during startup
+            # (e.g., debug info, status messages like "File Edit MCP Server running on stdio").
+            # The MCP client library's background stdout_reader task will log warnings for these,
+            # but they don't prevent successful connection. If you see "Failed to parse JSONRPC message"
+            # warnings in the logs, they are usually harmless and can be ignored if the server
+            # eventually connects successfully (which is indicated by tools being loaded).
             await session.initialize()
 
             # List available tools
@@ -137,6 +143,11 @@ class MCPServerConnection:
             for tool in self.tools:
                 desc = tool.description[:60] if len(tool.description) > 60 else tool.description
                 print(f"  - {tool.name}: {desc}...")
+            
+            # Note: If you see "Failed to parse JSONRPC message" warnings in the logs above,
+            # these are usually harmless. They occur when MCP servers output non-JSONRPC
+            # messages (like startup status messages) to stdout. The connection is still
+            # successful as long as tools are loaded.
             return True
 
         except Exception as e:
@@ -222,7 +233,43 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
 
     try:
         with open(config_file, encoding="utf-8") as f:
-            config = json.load(f)
+            try:
+                config = json.load(f)
+            except json.JSONDecodeError as e:
+                # Provide detailed error information for JSON parsing errors
+                error_msg = f"JSON syntax error in MCP config file '{config_path}':\n"
+                error_msg += f"  Error: {e.msg}\n"
+                error_msg += f"  Location: line {e.lineno}, column {e.colno} (char {e.pos})\n"
+                
+                # Read the file to show context around the error
+                try:
+                    with open(config_file, encoding="utf-8") as f2:
+                        lines = f2.readlines()
+                    if e.lineno <= len(lines):
+                        error_line = lines[e.lineno - 1].rstrip()
+                        error_msg += f"  Problematic line {e.lineno}: {error_line}\n"
+                        # Show pointer to the error column
+                        if e.colno > 0:
+                            pointer = " " * (e.colno - 1) + "^"
+                            error_msg += f"  {' ' * (len(str(e.lineno)) + 2)}{pointer}\n"
+                        # Show context (previous and next lines)
+                        if e.lineno > 1:
+                            prev_line = lines[e.lineno - 2].rstrip()
+                            error_msg += f"  Line {e.lineno - 1}: {prev_line}\n"
+                        if e.lineno < len(lines):
+                            next_line = lines[e.lineno].rstrip()
+                            error_msg += f"  Line {e.lineno + 1}: {next_line}\n"
+                except Exception:
+                    pass  # If we can't read the file, just show the basic error
+                
+                error_msg += "\nCommon JSON errors:\n"
+                error_msg += "  - Missing quotes around property names\n"
+                error_msg += "  - Trailing commas (not allowed in JSON)\n"
+                error_msg += "  - Comments (JSON doesn't support comments)\n"
+                error_msg += "  - Unclosed brackets or braces\n"
+                
+                print(error_msg)
+                raise  # Re-raise the exception after showing detailed info
 
         mcp_servers = config.get("mcpServers", {})
 
