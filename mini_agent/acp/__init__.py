@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,7 @@ from mini_agent.retry import RetryConfig as RetryConfigBase
 from mini_agent.schema import Message
 from mini_agent.tools.mcp_loader import get_mcp_tools_metadata_prompt, MCPTool
 from mini_agent.acp.thread_storage import ThreadStorage
+from mini_agent.acp.allow_list import AllowListStorage
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,7 @@ class SessionState:
     cancelled: bool = False
     current_mode: str = MODE_AGENT  # Current session mode, default to agent
     thread_storage: ThreadStorage | None = None  # Thread storage for saving/loading session history
+    allow_list_storage: AllowListStorage | None = None  # Allow list storage for MCP tool permissions
 
 
 class MiniMaxACPAgent:
@@ -244,7 +247,14 @@ You can perform any operations needed to complete tasks.
         thread_storage_dir = self._get_thread_storage_dir()
         thread_storage = ThreadStorage(thread_storage_dir)
         
-        self._sessions[session_id] = SessionState(agent=agent, thread_storage=thread_storage)
+        # Initialize allow list storage
+        allow_list_storage = AllowListStorage(thread_storage_dir)
+        
+        self._sessions[session_id] = SessionState(
+            agent=agent, 
+            thread_storage=thread_storage,
+            allow_list_storage=allow_list_storage
+        )
         
         # Return available modes in the response
         available_modes = self._get_available_modes()
@@ -410,8 +420,15 @@ You can perform any operations needed to complete tasks.
         # Restore messages (replace the default system message)
         agent.messages = messages
         
+        # Initialize allow list storage
+        allow_list_storage = AllowListStorage(thread_storage_dir)
+        
         # Create session state
-        state = SessionState(agent=agent, thread_storage=thread_storage)
+        state = SessionState(
+            agent=agent, 
+            thread_storage=thread_storage,
+            allow_list_storage=allow_list_storage
+        )
         self._sessions[session_id] = state
         
         # Stream historical messages back to client
@@ -485,6 +502,17 @@ You can perform any operations needed to complete tasks.
         }
         return tool_name in dangerous_tools
 
+    def _is_delete_operation(self, tool_name: str) -> bool:
+        """Check if a tool is a delete operation.
+        
+        Args:
+            tool_name: Name of the tool to check
+            
+        Returns:
+            True if tool is a delete operation, False otherwise
+        """
+        return "delete" in tool_name.lower()
+
     async def _request_tool_permission(
         self,
         session_id: str,
@@ -492,7 +520,8 @@ You can perform any operations needed to complete tasks.
         tool_name: str,
         tool_args: dict[str, Any],
         tool_label: str,
-    ) -> bool:
+        tool: Any = None,
+    ) -> tuple[bool, str]:
         """Request permission from the client to execute a tool.
         
         Args:
@@ -501,9 +530,12 @@ You can perform any operations needed to complete tasks.
             tool_name: Name of the tool
             tool_args: Arguments for the tool
             tool_label: Display label for the tool call
+            tool: Tool object (optional, used to determine if it's an MCP tool)
             
         Returns:
-            True if permission is granted, False otherwise
+            Tuple of (permission_granted: bool, option_id: str)
+            - permission_granted: True if permission is granted, False otherwise
+            - option_id: The selected option ID ("allow_once", "add_to_allow_list", "reject_once")
         """
         try:
             # Determine tool kind based on tool name
@@ -539,6 +571,14 @@ You can perform any operations needed to complete tasks.
                 ),
             ]
             
+            # Add "Add to allow list" option only for MCP tools
+            if tool is not None and isinstance(tool, MCPTool):
+                options.insert(1, PermissionOption(
+                    option_id="add_to_allow_list",
+                    name="Add to allow list",
+                    kind="allow_once",  # Use allow_once kind for compatibility
+                ))
+            
             # Request permission - pass parameters directly, not as a RequestPermissionRequest object
             response = await self._conn.request_permission(
                 options=options,
@@ -546,21 +586,25 @@ You can perform any operations needed to complete tasks.
                 tool_call=tool_call_update,
             )
             
-            # Check if permission was granted
+            # Check if permission was granted and get the selected option
             # The response has an 'outcome' field which is a SelectedPermissionOutcome
             # with an 'option_id' field indicating which option was chosen
+            option_id = "reject_once"  # Default to reject
             if hasattr(response, "outcome") and response.outcome is not None:
                 if isinstance(response.outcome, SelectedPermissionOutcome):
-                    return response.outcome.option_id == "allow_once"
+                    option_id = response.outcome.option_id
                 # Handle case where outcome might be a dict
-                if isinstance(response.outcome, dict):
-                    return response.outcome.get("option_id") == "allow_once"
-            # Default to False if we can't determine
-            return False
+                elif isinstance(response.outcome, dict):
+                    option_id = response.outcome.get("option_id", "reject_once")
+            
+            # Determine if permission was granted
+            permission_granted = option_id in ("allow_once", "add_to_allow_list")
+            
+            return permission_granted, option_id
         except Exception as exc:
             logger.exception(f"Error requesting permission for tool {tool_name}: {exc}")
             # On error, default to denying permission for safety
-            return False
+            return False, "reject_once"
 
     async def _run_turn(self, state: SessionState, session_id: str) -> str:
         agent = state.agent
@@ -646,51 +690,64 @@ You can perform any operations needed to complete tasks.
                         result_error=text,
                     )
                 else:
-                    # Check if tool requires confirmation
+                    # Check allow list for MCP tools (skip confirmation if allowed and not a delete operation)
                     permission_granted = True
-                    if self._requires_confirmation(name):
-                        permission_granted = await self._request_tool_permission(
+                    option_id = "allow_once"
+                    
+                    # Check if tool is in allow list and not a delete operation
+                    if isinstance(tool, MCPTool) and state.allow_list_storage:
+                        if state.allow_list_storage.is_allowed(name):
+                            # Tool is in allow list, but still require confirmation for delete operations
+                            if not self._is_delete_operation(name):
+                                # Auto-allow non-delete operations from allow list
+                                permission_granted = True
+                            else:
+                                # Delete operations still need confirmation even if in allow list
+                                permission_granted, option_id = await self._request_tool_permission(
+                                    session_id=session_id,
+                                    tool_call_id=call.id,
+                                    tool_name=name,
+                                    tool_args=args,
+                                    tool_label=label,
+                                    tool=tool,
+                                )
+                        else:
+                            # MCP tool not in allow list - always request permission (to show add_to_allow_list option)
+                            permission_granted, option_id = await self._request_tool_permission(
+                                session_id=session_id,
+                                tool_call_id=call.id,
+                                tool_name=name,
+                                tool_args=args,
+                                tool_label=label,
+                                tool=tool,
+                            )
+                    elif self._requires_confirmation(name):
+                        # Non-MCP tool that requires confirmation (e.g., bash)
+                        permission_granted, option_id = await self._request_tool_permission(
                             session_id=session_id,
                             tool_call_id=call.id,
                             tool_name=name,
                             tool_args=args,
                             tool_label=label,
+                            tool=tool,
                         )
-                        if not permission_granted:
-                            text, status = "❌ Permission denied by user", "failed"
-                            # Log tool execution result
-                            agent.logger.log_tool_result(
-                                tool_name=name,
-                                arguments=args,
-                                result_success=False,
-                                result_error=text,
-                            )
-                        else:
-                            # Permission granted, proceed with execution
-                            try:
-                                result = await tool.execute(**args)
-                                status = "completed" if result.success else "failed"
-                                prefix = "✅" if result.success else "❌"
-                                text = f"{prefix} {result.content if result.success else result.error or 'Tool execution failed'}"
-                                # Log tool execution result
-                                agent.logger.log_tool_result(
-                                    tool_name=name,
-                                    arguments=args,
-                                    result_success=result.success,
-                                    result_content=result.content if result.success else None,
-                                    result_error=result.error if not result.success else None,
-                                )
-                            except Exception as exc:
-                                status, text = "failed", f"❌ Tool error: {exc}"
-                                # Log tool execution result
-                                agent.logger.log_tool_result(
-                                    tool_name=name,
-                                    arguments=args,
-                                    result_success=False,
-                                    result_error=str(exc),
-                                )
+                    
+                    # Handle add_to_allow_list option
+                    if permission_granted and option_id == "add_to_allow_list" and state.allow_list_storage:
+                        state.allow_list_storage.add_tool(name)
+                        logger.info(f"Added tool '{name}' to allow list")
+                    
+                    if not permission_granted:
+                        text, status = "❌ Permission denied by user", "failed"
+                        # Log tool execution result
+                        agent.logger.log_tool_result(
+                            tool_name=name,
+                            arguments=args,
+                            result_success=False,
+                            result_error=text,
+                        )
                     else:
-                        # No confirmation required, execute directly
+                        # Permission granted, proceed with execution
                         try:
                             result = await tool.execute(**args)
                             status = "completed" if result.success else "failed"
@@ -872,6 +929,30 @@ async def run_acp_server(config: Config | None = None, config_path: Path | str |
         # Generate metadata even if no tools (will show a helpful message)
         mcp_metadata = get_mcp_tools_metadata_prompt([])
         system_prompt = system_prompt.replace("{MCP_TOOLS_METADATA}", mcp_metadata)
+    
+    # Check if file-edit-mcp-server tools are available
+    # If not, remove the "File Operations" section from system prompt
+    file_edit_tool_names = {
+        "file_read", "file_write", "edit_file_by_context", 
+        "file_insert_at_head", "file_append_at_tail", 
+        "file_find_position", "directory_create", "file_delete"
+    }
+    has_file_edit_tools = any(tool.name in file_edit_tool_names for tool in mcp_tools) if mcp_tools else False
+    
+    if not has_file_edit_tools:
+        # Remove the entire "File Operations" section
+        # Match from "### File Operations" to the next "###" section (including the blank line before it)
+        # Pattern: "### File Operations" followed by content until the next "###" section
+        file_ops_pattern = r"### File Operations.*?(?=\n### |\Z)"
+        system_prompt = re.sub(file_ops_pattern, "", system_prompt, flags=re.DOTALL)
+        # Clean up any double newlines that might result from removal
+        system_prompt = re.sub(r"\n\n\n+", "\n\n", system_prompt)
+        # Also remove the reference to file-edit-mcp-server in "Core Capabilities" section
+        system_prompt = system_prompt.replace(
+            "- **MCP Tools**: Access additional tools from configured MCP servers (including file-edit-mcp-server for file operations)",
+            "- **MCP Tools**: Access additional tools from configured MCP servers"
+        )
+        logger.info("Removed File Operations section from system prompt (file-edit-mcp-server tools not available)")
     rcfg = config.llm.retry
     llm = LLMClient(api_key=config.llm.api_key, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base))
     reader, writer = await stdio_streams()

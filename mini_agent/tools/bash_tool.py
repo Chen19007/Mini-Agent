@@ -4,6 +4,7 @@ Supports both bash (Unix/Linux/macOS) and PowerShell (Windows).
 """
 
 import asyncio
+import logging
 import platform
 import re
 import time
@@ -13,6 +14,8 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from .base import Tool, ToolResult
+
+logger = logging.getLogger(__name__)
 
 
 class BashOutputResult(ToolResult):
@@ -56,11 +59,12 @@ class BackgroundShell:
     IO operations are managed externally by BackgroundShellManager.
     """
 
-    def __init__(self, bash_id: str, command: str, process: "asyncio.subprocess.Process", start_time: float):
+    def __init__(self, bash_id: str, command: str, process: "asyncio.subprocess.Process", start_time: float, timeout: float = 300.0):
         self.bash_id = bash_id
         self.command = command
         self.process = process
         self.start_time = start_time
+        self.timeout = timeout  # Timeout in seconds (default: 300 seconds / 5 minutes)
         self.output_lines: list[str] = []
         self.last_read_index = 0
         self.status = "running"
@@ -142,8 +146,20 @@ class BackgroundShellManager:
         async def monitor():
             try:
                 process = shell.process
-                # Continuously read output until process ends
+                start_time = shell.start_time
+                timeout = shell.timeout
+                
+                # Continuously read output until process ends or times out
                 while process.returncode is None:
+                    # Check for timeout
+                    elapsed = time.time() - start_time
+                    if elapsed >= timeout:
+                        # Timeout reached, terminate the process
+                        await shell.terminate()
+                        shell.status = "timeout"
+                        shell.add_output(f"[TIMEOUT] Process timed out after {timeout} seconds ({timeout/60:.1f} minutes)")
+                        break
+                    
                     try:
                         if process.stdout:
                             line = await asyncio.wait_for(process.stdout.readline(), timeout=0.1)
@@ -159,13 +175,18 @@ class BackgroundShellManager:
                         await asyncio.sleep(0.1)
                         continue
 
-                # Process ended, wait for exit code
-                try:
-                    returncode = await process.wait()
-                except Exception:
-                    returncode = -1
+                # Process ended (normally or due to timeout), wait for exit code if not already set
+                # Don't update status if already set to "timeout"
+                if shell.status != "timeout":
+                    if process.returncode is None:
+                        try:
+                            returncode = await process.wait()
+                        except Exception:
+                            returncode = -1
+                    else:
+                        returncode = process.returncode
 
-                shell.update_status(is_alive=False, exit_code=returncode)
+                    shell.update_status(is_alive=False, exit_code=returncode)
 
             except Exception as e:
                 if bash_id in cls._shells:
@@ -240,7 +261,7 @@ For terminal operations like git, npm, docker, etc. DO NOT use for file operatio
 
 Parameters:
   - command (required): PowerShell command to execute
-  - timeout (optional): Timeout in seconds (default: 120, max: 600) for foreground commands
+  - timeout (optional): Timeout in seconds (default: 120 for foreground, 300 for background; max: 3600). Applies to both foreground and background commands. Estimate based on command type.
   - run_in_background (optional): Set true for long-running commands (servers, etc.)
 
 Tips:
@@ -259,7 +280,7 @@ For terminal operations like git, npm, docker, etc. DO NOT use for file operatio
 
 Parameters:
   - command (required): Bash command to execute
-  - timeout (optional): Timeout in seconds (default: 120, max: 600) for foreground commands
+  - timeout (optional): Timeout in seconds (default: 120 for foreground, 300 for background; max: 3600). Applies to both foreground and background commands. Estimate based on command type.
   - run_in_background (optional): Set true for long-running commands (servers, etc.)
 
 Tips:
@@ -287,7 +308,17 @@ Examples:
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Optional: Timeout in seconds (default: 120, max: 600). Only applies to foreground commands.",
+                    "description": (
+                        "Optional: Timeout in seconds for command execution. "
+                        "Applies to both foreground and background commands. "
+                        "Default: 300 seconds (5 minutes) for background commands, 120 seconds for foreground commands. "
+                        "Max: 3600 seconds (1 hour). "
+                        "You should estimate timeout based on command type:\n"
+                        "- Quick commands (git status, ls, echo): 10-30 seconds\n"
+                        "- Medium commands (npm install, compilation): 60-300 seconds (1-5 minutes)\n"
+                        "- Long-running services (servers, daemons): 300-3600 seconds (5 minutes - 1 hour)\n"
+                        "- Commands that may wait for user input: Use shorter timeout (60 seconds) or run in foreground"
+                    ),
                     "default": 120,
                 },
                 "run_in_background": {
@@ -334,6 +365,19 @@ Examples:
             if run_in_background:
                 # Background execution: Create isolated process
                 bash_id = str(uuid.uuid4())[:8]
+                
+                # Background command timeout handling
+                # LLM can estimate timeout based on command type, default is 300 seconds (5 minutes)
+                # Range: 1-3600 seconds
+                if timeout and timeout > 0:
+                    bg_timeout = float(timeout)
+                    if bg_timeout > 3600:
+                        bg_timeout = 3600.0
+                    elif bg_timeout < 1:
+                        bg_timeout = 1.0
+                else:
+                    # Use default value 300 seconds (5 minutes)
+                    bg_timeout = 300.0
 
                 # Start background process with combined stdout/stderr
                 if self.is_windows:
@@ -349,8 +393,14 @@ Examples:
                         stderr=asyncio.subprocess.STDOUT,
                     )
 
-                # Create background shell and add to manager
-                bg_shell = BackgroundShell(bash_id=bash_id, command=command, process=process, start_time=time.time())
+                # Create background shell and add to manager (pass timeout)
+                bg_shell = BackgroundShell(
+                    bash_id=bash_id, 
+                    command=command, 
+                    process=process, 
+                    start_time=time.time(),
+                    timeout=bg_timeout
+                )
                 BackgroundShellManager.add(bg_shell)
 
                 # Start monitoring task
@@ -358,6 +408,10 @@ Examples:
 
                 # Return immediately with bash_id
                 message = f"Command started in background. Use bash_output to monitor (bash_id='{bash_id}')."
+                if bg_timeout < 300:
+                    message += f" Timeout: {bg_timeout}s"
+                elif bg_timeout > 300:
+                    message += f" Timeout: {bg_timeout}s ({bg_timeout/60:.1f} minutes)"
                 formatted_content = f"{message}\n\nCommand: {command}\nBash ID: {bash_id}"
 
                 return BashOutputResult(
@@ -449,6 +503,7 @@ class BashOutputTool(Tool):
           - "running": Still executing
           - "completed": Finished successfully
           - "failed": Finished with error
+          - "timeout": Timed out (process was terminated after timeout)
           - "terminated": Was terminated
           - "error": Error occurred
 
@@ -502,9 +557,23 @@ class BashOutputTool(Tool):
             # Get new output
             new_lines = bg_shell.get_new_output(filter_pattern=filter_str)
             stdout = "\n".join(new_lines) if new_lines else ""
+            
+            # Determine success based on status
+            # Timeout is considered a failure, but we still return the output
+            is_success = bg_shell.status not in ("timeout", "failed", "error")
+            
+            # Add status information if timeout or other non-success status
+            error_msg = None
+            if bg_shell.status == "timeout":
+                error_msg = f"Process timed out (status: {bg_shell.status})"
+            elif bg_shell.status == "failed":
+                error_msg = f"Process failed (status: {bg_shell.status}, exit_code: {bg_shell.exit_code})"
+            elif bg_shell.status == "error":
+                error_msg = f"Process error (status: {bg_shell.status})"
 
             return BashOutputResult(
-                success=True,
+                success=is_success,
+                error=error_msg,
                 stdout=stdout,
                 stderr="",  # Background shells combine stdout/stderr
                 exit_code=bg_shell.exit_code if bg_shell.exit_code is not None else 0,
